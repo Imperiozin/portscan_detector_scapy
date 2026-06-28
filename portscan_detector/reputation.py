@@ -155,8 +155,12 @@ class CriticalityAssessor:
         )
 
     def _base_score(self, event: PortScanEvent) -> tuple[int, list[str]]:
-        score = min(30, event.port_count * 3) + min(20, event.packet_count)
-        reasons = [f"comportamento:{score}"]
+        behavior_score = min(30, event.port_count * 3) + min(20, event.packet_count)
+        technical_score = int(getattr(event, "risk_score", 0) or 0)
+        score = max(behavior_score, technical_score)
+        reasons = [f"comportamento:{behavior_score}"]
+        if technical_score:
+            reasons.append(f"risco_tecnico:{technical_score}")
         scan_types = set(event.scan_types)
         if HORIZONTAL_SCAN in scan_types:
             score += 10
@@ -173,7 +177,7 @@ class CriticalityAssessor:
         if UDP_SCAN in scan_types:
             score += 2
             reasons.append("udp")
-        return min(score, 80), reasons
+        return min(score, 100), reasons
 
     def _reputation_score(self, reputation: ReputationInfo | None, label: str) -> tuple[int, list[str]]:
         if reputation is None:
