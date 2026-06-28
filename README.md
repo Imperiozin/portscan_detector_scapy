@@ -3,6 +3,7 @@
 Projeto em Python para detectar indicios de port scan usando Scapy e salvar os eventos encontrados em um banco SQLite.
 
 O detector observa pacotes TCP e UDP. Quando encontra muitas tentativas relacionadas dentro de uma janela curta de tempo, o evento e registrado como possivel port scan.
+Cada evento recebe uma `criticality` de 0 a 100. Eventos com criticidade igual ou maior que o threshold de alerta sao impressos em vermelho na CLI.
 
 ## Tipos Detectados
 
@@ -54,10 +55,30 @@ python -m portscan_detector --interface "Ethernet"
 
 Use exatamente o valor exibido no campo `name` da listagem de interfaces. No Windows, muitas vezes o nome usado pelo Scapy nao e `Ethernet`, mas algo como `\Device\NPF_{...}`.
 
+Na captura ao vivo, o padrao e analisar apenas pacotes de entrada (`--direction inbound`). O detector tenta descobrir os IPs da interface escolhida para diferenciar entrada e saida.
+
+Para voltar ao comportamento anterior e analisar entrada e saida:
+
+```bash
+python -m portscan_detector --interface "Ethernet" --direction both
+```
+
+Para analisar apenas saida:
+
+```bash
+python -m portscan_detector --interface "Ethernet" --direction outbound
+```
+
 Analisar um arquivo `.pcap` existente:
 
 ```bash
 python -m portscan_detector --pcap captura.pcap
+```
+
+Em PCAP, o padrao continua `--direction both`, porque o arquivo nao informa qual interface local deve ser usada como referencia.
+
+```bash
+python -m portscan_detector --pcap captura.pcap --direction both
 ```
 
 Salvar em outro banco:
@@ -69,10 +90,56 @@ python -m portscan_detector --interface "Ethernet" --database eventos.db
 Configurar limite e janela:
 
 ```bash
-python -m portscan_detector --interface "Ethernet" --threshold 10 --window 30
+python -m portscan_detector --interface "Ethernet" --threshold 10 --window 120
 ```
 
-Neste exemplo, um evento sera registrado quando forem observadas pelo menos 10 tentativas relacionadas em ate 30 segundos.
+Neste exemplo, um evento sera registrado quando forem observadas pelo menos 10 tentativas relacionadas em ate 120 segundos.
+
+Configurar threshold de alerta e cooldown:
+
+```bash
+python -m portscan_detector --interface "Ethernet" --alert-threshold 60 --cooldown 30
+```
+
+Padroes atuais:
+
+- `--window 120`: janela de validacao em segundos
+- `--cooldown 30`: tempo minimo entre alertas repetidos
+- `--alert-threshold 60`: criticidade minima para alerta vermelho
+
+## Criticidade, Whitelist e Blacklist
+
+Por padrao, o detector procura `whitelist.json` e `blacklist.json` no diretorio atual. Voce pode informar outros arquivos:
+
+```bash
+python -m portscan_detector --interface "Ethernet" --whitelist minha_whitelist.json --blacklist minha_blacklist.json
+```
+
+Formato aceito:
+
+```json
+{
+  "ips": ["203.0.113.10", "198.51.100.0/24"],
+  "source_ips": ["10.0.0.0/8"],
+  "target_ips": ["192.168.1.10"],
+  "countries": ["BR", "CN"],
+  "asns": ["AS13335", 15169],
+  "organizations": ["cloudflare", "google"],
+  "ports": [22, 3389],
+  "scan_types": ["syn_scan", "horizontal_scan"]
+}
+```
+
+Regras em `blacklist.json` levam a criticidade automaticamente para `100`. Regras em `whitelist.json` reduzem a criticidade calculada. Quando houver conflito, a blacklist prevalece.
+
+A criticidade combina o comportamento observado com reputacao externa:
+
+- AbuseIPDB via `--abuseipdb-key` ou variavel `ABUSEIPDB_KEY`
+- GreyNoise via `--greynoise-key` ou variavel `GREYNOISE_KEY`; sem chave, tenta o endpoint community
+- CrowdSec via comando local `cscli`, quando instalado
+- WHOIS via comando local `whois`, quando instalado
+
+As consultas externas sao best-effort: falhas de rede, falta de chave ou ferramentas ausentes nao bloqueiam a deteccao local.
 
 ## Teste Com Nmap
 
@@ -115,15 +182,17 @@ Campos salvos:
 - `target_ip`: IP de destino
 - `ports`: lista de portas acessadas
 - `scan_types`: lista com um ou mais tipos identificados
+- `criticality`: criticidade de 0 a 100
+- `criticality_reasons`: motivos usados no calculo da criticidade
 - `port_count`: quantidade de portas diferentes
 - `packet_count`: quantidade de pacotes observados no evento
 
 Para consultar:
 
 ```bash
-sqlite3 port_scans.db "select detected_at, source_ip, target_ip, ports, scan_types from port_scan_events;"
+sqlite3 port_scans.db "select detected_at, source_ip, target_ip, criticality, ports, scan_types from port_scan_events;"
 ```
 
 ## Observacao
 
-Este detector identifica comportamento compativel com port scan, nao uma prova absoluta de ataque. Ajuste `--threshold` e `--window` conforme o volume normal da sua rede.
+Este detector identifica comportamento compativel com port scan, nao uma prova absoluta de ataque. Ajuste `--threshold`, `--window` e `--alert-threshold` conforme o volume normal da sua rede.

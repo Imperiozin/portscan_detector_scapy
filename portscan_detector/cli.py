@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 from pathlib import Path
 
 from scapy.all import sniff
 from scapy.utils import PcapReader
 
-from .detector import PortScanDetector
-from .interface_listing import format_interface_names, print_interfaces
+from .detector import Direction, PortScanDetector
+from .interface_listing import format_interface_names, get_interfaces, print_interfaces
+from .reputation import load_assessor
 from .storage import SQLiteEventStore
 
 
@@ -38,14 +40,48 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--window",
         type=float,
-        default=20.0,
-        help="Janela de tempo em segundos. Padrao: 20",
+        default=120.0,
+        help="Janela de validacao em segundos. Padrao: 120",
     )
     parser.add_argument(
         "--cooldown",
         type=float,
-        default=60.0,
-        help="Tempo minimo entre alertas repetidos do mesmo par origem/destino. Padrao: 60",
+        default=30.0,
+        help="Tempo minimo entre alertas repetidos do mesmo par origem/destino. Padrao: 30",
+    )
+    parser.add_argument(
+        "--alert-threshold",
+        type=int,
+        default=60,
+        help="Criticidade minima para imprimir alerta em vermelho. Padrao: 60",
+    )
+    parser.add_argument(
+        "--direction",
+        choices=("inbound", "outbound", "both"),
+        default=None,
+        help="Direcao dos pacotes analisados. Padrao: inbound na captura ao vivo, both em PCAP.",
+    )
+    parser.add_argument(
+        "--whitelist",
+        type=Path,
+        default=Path("whitelist.json"),
+        help="Arquivo JSON de whitelist. Padrao: whitelist.json",
+    )
+    parser.add_argument(
+        "--blacklist",
+        type=Path,
+        default=Path("blacklist.json"),
+        help="Arquivo JSON de blacklist. Padrao: blacklist.json",
+    )
+    parser.add_argument(
+        "--abuseipdb-key",
+        default=None,
+        help="Chave da AbuseIPDB. Se omitida, usa ABUSEIPDB_KEY ou a chave padrao configurada.",
+    )
+    parser.add_argument(
+        "--greynoise-key",
+        default=None,
+        help="Chave da GreyNoise. Se omitida, usa GREYNOISE_KEY; sem chave tenta endpoint community.",
     )
     parser.add_argument(
         "--bpf",
@@ -62,19 +98,36 @@ def main() -> None:
         print_interfaces()
         return
 
+    direction = resolve_direction(args.direction, using_live_capture=bool(args.interface))
+    local_networks = resolve_local_networks(args.interface)
+
     store = SQLiteEventStore(args.database)
+    assessor = load_assessor(
+        whitelist_path=args.whitelist,
+        blacklist_path=args.blacklist,
+        abuseipdb_key=args.abuseipdb_key,
+        greynoise_key=args.greynoise_key,
+    )
     detector = PortScanDetector(
         threshold=args.threshold,
         window_seconds=args.window,
         cooldown_seconds=args.cooldown,
         on_event=store.save,
+        assess_event=assessor.assess,
+        alert_threshold=args.alert_threshold,
+        direction=direction,
+        local_networks=local_networks,
     )
 
     if args.pcap:
         analyze_pcap(args.pcap, detector)
         return
 
-    print(f"Capturando na interface {args.interface!r}. Pressione Ctrl+C para parar.")
+    print(
+        f"Capturando na interface {args.interface!r} "
+        f"(direcao={direction}). "
+        "Pressione Ctrl+C para parar."
+    )
     try:
         sniff(
             iface=args.interface,
@@ -118,3 +171,34 @@ def analyze_pcap(path: Path, detector: PortScanDetector) -> None:
             detector.process_packet(packet)
 
     print(f"Analise concluida: {count} pacote(s) processado(s).")
+
+
+def resolve_direction(direction: str | None, using_live_capture: bool) -> Direction:
+    if direction is not None:
+        return direction  # type: ignore[return-value]
+    return "inbound" if using_live_capture else "both"
+
+
+def resolve_local_networks(interface_name: str | None) -> tuple[ipaddress._BaseNetwork, ...]:
+    if not interface_name:
+        return ()
+    return tuple(dict.fromkeys(_interface_networks(interface_name)))
+
+
+def _interface_networks(interface_name: str) -> list[ipaddress._BaseNetwork]:
+    networks = []
+    for interface in get_interfaces():
+        if interface.name != interface_name:
+            continue
+        for value in interface.ips:
+            network = _try_parse_network(value)
+            if network is not None:
+                networks.append(network)
+    return networks
+
+
+def _try_parse_network(value: str) -> ipaddress._BaseNetwork | None:
+    try:
+        return ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return None

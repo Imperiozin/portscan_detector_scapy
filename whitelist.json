@@ -1,0 +1,10 @@
+{
+  "ips": [],
+  "source_ips": [],
+  "target_ips": [],
+  "countries": [],
+  "asns": [],
+  "organizations": ["Google LLC"],
+  "ports": [],
+  "scan_types": []
+}

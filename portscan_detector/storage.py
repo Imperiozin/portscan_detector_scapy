@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from .detector import PortScanEvent
@@ -13,7 +14,7 @@ class SQLiteEventStore:
         self._initialize()
 
     def save(self, event: PortScanEvent) -> None:
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(
                 """
                 insert into port_scan_events (
@@ -24,9 +25,11 @@ class SQLiteEventStore:
                     target_ip,
                     ports,
                     scan_types,
+                    criticality,
+                    criticality_reasons,
                     port_count,
                     packet_count
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.detected_at.isoformat(),
@@ -36,13 +39,16 @@ class SQLiteEventStore:
                     event.target_ip,
                     json.dumps(event.ports),
                     json.dumps(event.scan_types),
+                    event.criticality,
+                    json.dumps(event.criticality_reasons),
                     event.port_count,
                     event.packet_count,
                 ),
             )
+            connection.commit()
 
     def _initialize(self) -> None:
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(
                 """
                 create table if not exists port_scan_events (
@@ -54,6 +60,8 @@ class SQLiteEventStore:
                     target_ip text not null,
                     ports text not null,
                     scan_types text not null default '[]',
+                    criticality integer not null default 0,
+                    criticality_reasons text not null default '[]',
                     port_count integer not null,
                     packet_count integer not null
                 )
@@ -70,9 +78,24 @@ class SQLiteEventStore:
                     add column scan_types text not null default '[]'
                     """
                 )
+            if "criticality" not in columns:
+                connection.execute(
+                    """
+                    alter table port_scan_events
+                    add column criticality integer not null default 0
+                    """
+                )
+            if "criticality_reasons" not in columns:
+                connection.execute(
+                    """
+                    alter table port_scan_events
+                    add column criticality_reasons text not null default '[]'
+                    """
+                )
             connection.execute(
                 """
                 create index if not exists idx_port_scan_events_source_target
                 on port_scan_events (source_ip, target_ip, detected_at)
                 """
             )
+            connection.commit()

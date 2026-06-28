@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Deque, Dict, Optional, Set, Tuple
+import ipaddress
+from typing import Callable, Deque, Dict, Literal, Optional, Set, Tuple
 
 from scapy.layers.inet import IP, TCP, UDP
 
@@ -13,6 +14,7 @@ HorizontalKey = Tuple[str, int, str]
 DistributedKey = Tuple[str, int, str]
 FlowKey = Tuple[str, str, int]
 CooldownKey = Tuple[str, str, int, str]
+Direction = Literal["inbound", "outbound", "both"]
 
 
 SYN_SCAN = "syn_scan"
@@ -36,6 +38,8 @@ class PortScanEvent:
     ports: tuple[int, ...]
     packet_count: int
     scan_types: tuple[str, ...]
+    criticality: int = 0
+    criticality_reasons: tuple[str, ...] = ()
 
     @property
     def port_count(self) -> int:
@@ -58,16 +62,26 @@ class PortScanDetector:
         window_seconds: float,
         cooldown_seconds: float,
         on_event: Callable[[PortScanEvent], None],
+        assess_event: Callable[[PortScanEvent], PortScanEvent] | None = None,
+        alert_threshold: int = 60,
+        direction: Direction = "both",
+        local_networks: tuple[ipaddress._BaseNetwork, ...] = (),
     ) -> None:
         if threshold < 2:
             raise ValueError("threshold deve ser pelo menos 2")
         if window_seconds <= 0:
             raise ValueError("window_seconds deve ser maior que zero")
+        if direction not in {"inbound", "outbound", "both"}:
+            raise ValueError("direction deve ser inbound, outbound ou both")
 
         self.threshold = threshold
         self.window_seconds = window_seconds
         self.cooldown_seconds = cooldown_seconds
         self.on_event = on_event
+        self.assess_event = assess_event
+        self.alert_threshold = max(0, min(100, alert_threshold))
+        self.direction = direction
+        self.local_networks = local_networks
         self._vertical_attempts: Dict[VerticalKey, Deque[ScanAttempt]] = defaultdict(deque)
         self._horizontal_attempts: Dict[HorizontalKey, Deque[ScanAttempt]] = defaultdict(deque)
         self._distributed_attempts: Dict[DistributedKey, Deque[ScanAttempt]] = defaultdict(deque)
@@ -80,17 +94,32 @@ class PortScanDetector:
             return None
 
         events = self._process_attempt(attempt)
+        assessed_events = []
         for event in events:
+            if self.assess_event is not None:
+                event = self.assess_event(event)
+            assessed_events.append(event)
             self.on_event(event)
-            print(
-                "Possivel port scan: "
-                f"{event.source_ip} -> {event.target_ip} "
-                f"tipos={','.join(event.scan_types)} "
-                f"portas={','.join(str(port) for port in event.ports)} "
-                f"janela={self.window_seconds:g}s"
-            )
+            self._print_event(event)
 
-        return events[0] if events else None
+        return assessed_events[0] if assessed_events else None
+
+    def _print_event(self, event: PortScanEvent) -> None:
+        is_alert = event.criticality >= self.alert_threshold
+        prefix = "ALERTA port scan" if is_alert else "Possivel port scan"
+        message = (
+            f"{prefix}: "
+            f"{event.source_ip} -> {event.target_ip} "
+            f"criticidade={event.criticality}/100 "
+            f"tipos={','.join(event.scan_types)} "
+            f"portas={','.join(str(port) for port in event.ports)} "
+            f"janela={self.window_seconds:g}s"
+        )
+        if event.criticality_reasons:
+            message += f" motivos={'; '.join(event.criticality_reasons)}"
+        if is_alert:
+            message = f"\033[31m{message}\033[0m"
+        print(message)
 
     def _process_attempt(self, attempt: ScanAttempt) -> list[PortScanEvent]:
         events = []
@@ -201,6 +230,8 @@ class PortScanDetector:
         ip_layer = packet[IP]  # type: ignore
         source_ip = str(ip_layer.src)
         target_ip = str(ip_layer.dst)
+        if not self._matches_direction(source_ip, target_ip):
+            return None
 
         if TCP in packet:  # type: ignore
             tcp_layer = packet[TCP]  # type: ignore
@@ -215,6 +246,27 @@ class PortScanDetector:
             return ScanAttempt(timestamp, source_ip, target_ip, int(udp_layer.dport), UDP_SCAN)
 
         return None
+
+    def _matches_direction(self, source_ip: str, target_ip: str) -> bool:
+        if self.direction == "both":
+            return True
+        if not self.local_networks:
+            return True
+
+        source_is_local = self._ip_in_local_networks(source_ip)
+        target_is_local = self._ip_in_local_networks(target_ip)
+        if self.direction == "inbound":
+            return target_is_local and not source_is_local
+        if self.direction == "outbound":
+            return source_is_local and not target_is_local
+        return True
+
+    def _ip_in_local_networks(self, ip: str) -> bool:
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return any(address in network for network in self.local_networks)
 
     def _classify_tcp_packet(self, packet: object, timestamp: float) -> Optional[str]:
         ip_layer = packet[IP]  # type: ignore
