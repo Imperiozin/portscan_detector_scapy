@@ -1,33 +1,49 @@
-# Port Scan Detector com Scapy
+# Recon Intelligence com Scapy
 
-Projeto em Python para detectar indicios de port scan usando Scapy e salvar os eventos encontrados em um banco SQLite.
+Projeto em Python para detectar comportamento compativel com reconhecimento de rede usando Scapy, enriquecer eventos com contexto tecnico e salvar evidencias em SQLite.
 
-O detector observa pacotes TCP e UDP. Quando encontra muitas tentativas relacionadas dentro de uma janela curta de tempo, o evento e registrado como possivel port scan.
-Cada evento recebe uma `criticality` de 0 a 100. Eventos com criticidade igual ou maior que o threshold de alerta sao impressos em vermelho na CLI.
+A ferramenta nao se limita a contar portas. Ela correlaciona tentativas, respostas do alvo, familia de servicos, risco tecnico, criticidade, reputacao, direcao do trafego e campanhas de reconhecimento para indicar o que a origem provavelmente estava tentando atacar ou mapear.
 
-## Tipos Detectados
+## Capacidades Principais
 
-- `syn_scan`: TCP SYN scan / half-open scan
-- `tcp_connect_scan`: tentativa compativel com TCP connect scan
-- `fin_scan`: TCP FIN scan
-- `null_scan`: TCP NULL scan
-- `xmas_scan`: TCP Xmas scan
-- `ack_scan`: TCP ACK scan
-- `udp_scan`: UDP scan
-- `horizontal_scan`: mesmo IP de origem testando a mesma porta em muitos destinos
-- `distributed_scan`: muitos IPs de origem testando a mesma porta no mesmo destino
+- Analise offline de arquivos `.pcap` e `.pcapng`.
+- Captura ao vivo em interface de rede com Scapy.
+- Deteccao de varredura vertical, horizontal, distribuida e de baixa velocidade.
+- Classificacao de SYN, TCP connect, FIN, NULL, XMAS, ACK e UDP scan.
+- Correlacao de respostas TCP para inferir servicos possivelmente abertos ou fechados.
+- Correlacao de ICMP Port Unreachable para enriquecer tentativas UDP.
+- Enriquecimento de portas para servicos, familias tecnicas, impacto e acoes defensivas.
+- Score de risco tecnico, confianca, criticidade operacional e evidencias.
+- Regras locais de whitelist e blacklist.
+- Enriquecimento best-effort por AbuseIPDB, GreyNoise, CrowdSec e WHOIS.
+- Agrupamento de eventos em casos com identificadores `ID-0001`, `ID-0002` etc.
+- Interface operacional local no terminal.
+- Dashboard web local para apresentacao visual e triagem defensiva.
 
-Um evento pode ter mais de um tipo em `scan_types`. Por exemplo, um SYN scan horizontal pode ser salvo como `["horizontal_scan", "syn_scan"]`.
+## Categorias Tecnicas Inferidas
+
+O catalogo interno identifica a familia provavel do servico a partir da porta e do protocolo:
+
+- Acesso remoto: SSH, RDP, Telnet, VNC, WinRM.
+- Administracao Windows e movimento lateral: SMB, RPC, NetBIOS, WinRM, RDP.
+- Servicos de dados: MySQL, PostgreSQL, Redis, MongoDB, Elasticsearch, SQL Server.
+- Superficie web: HTTP, HTTPS e portas web alternativas.
+- Infraestrutura e plataformas: Docker API, Kubernetes API, Kubelet, etcd, registries e metricas.
+- Dispositivos de rede: SNMP, BGP, Syslog, VPN e servicos de gerenciamento.
+- Email: SMTP, IMAP e POP3.
+- Industrial ou IoT: Modbus, MQTT, BACnet e EtherNet/IP.
+- Resolucao de nomes: DNS, mDNS e servicos relacionados.
 
 ## Requisitos
 
 - Python 3.10+
 - Permissao de administrador/root para captura ao vivo
 - Scapy
+- Rich, para a interface operacional no terminal
 - Npcap no Windows, ou libpcap em Linux/macOS
-- Nmap, para gerar scans reais de teste
+- Nmap, apenas para gerar trafego de teste autorizado
 
-No Windows, instale o Npcap e marque a opcao de compatibilidade com WinPcap durante a instalacao. O download manual oficial fica em:
+No Windows, instale o Npcap e marque a opcao de compatibilidade com WinPcap durante a instalacao:
 
 https://npcap.com/#download
 
@@ -36,8 +52,6 @@ Instale as dependencias Python:
 ```bash
 python -m pip install -r requirements.txt
 ```
-
-Se o comando `python` abrir o alias da Microsoft Store ou falhar, instale o Python pelo site oficial e marque a opcao de adicionar ao `PATH`.
 
 ## Uso
 
@@ -53,11 +67,11 @@ Capturar ao vivo em uma interface:
 python -m portscan_detector --interface "Ethernet"
 ```
 
-Use exatamente o valor exibido no campo `name` da listagem de interfaces. No Windows, muitas vezes o nome usado pelo Scapy nao e `Ethernet`, mas algo como `\Device\NPF_{...}`.
+Por padrao, a captura usa o filtro BPF `tcp or udp or icmp`, pois o ICMP pode indicar respostas relevantes para scans UDP.
 
 Na captura ao vivo, o padrao e analisar apenas pacotes de entrada (`--direction inbound`). O detector tenta descobrir os IPs da interface escolhida para diferenciar entrada e saida.
 
-Para voltar ao comportamento anterior e analisar entrada e saida:
+Para analisar entrada e saida:
 
 ```bash
 python -m portscan_detector --interface "Ethernet" --direction both
@@ -77,35 +91,68 @@ python -m portscan_detector --pcap captura.pcap
 
 Em PCAP, o padrao continua `--direction both`, porque o arquivo nao informa qual interface local deve ser usada como referencia.
 
-```bash
-python -m portscan_detector --pcap captura.pcap --direction both
-```
-
 Salvar em outro banco:
 
 ```bash
-python -m portscan_detector --interface "Ethernet" --database eventos.db
+python -m portscan_detector --pcap captura.pcap --database eventos.db
 ```
 
-Configurar limite e janela:
+Configurar limite, janela, cooldown e threshold de alerta:
 
 ```bash
-python -m portscan_detector --interface "Ethernet" --threshold 10 --window 120
-```
-
-Neste exemplo, um evento sera registrado quando forem observadas pelo menos 10 tentativas relacionadas em ate 120 segundos.
-
-Configurar threshold de alerta e cooldown:
-
-```bash
-python -m portscan_detector --interface "Ethernet" --alert-threshold 60 --cooldown 30
+python -m portscan_detector --interface "Ethernet" --threshold 10 --window 120 --cooldown 30 --alert-threshold 60
 ```
 
 Padroes atuais:
 
-- `--window 120`: janela de validacao em segundos
-- `--cooldown 30`: tempo minimo entre alertas repetidos
-- `--alert-threshold 60`: criticidade minima para alerta vermelho
+- `--window 120`: janela de validacao em segundos.
+- `--cooldown 30`: tempo minimo entre alertas repetidos.
+- `--alert-threshold 60`: criticidade minima para alerta em destaque.
+
+## Interfaces
+
+Abrir a interface operacional local:
+
+```bash
+python -m portscan_detector --ui
+```
+
+Abrir o dashboard web local:
+
+```bash
+python -m portscan_detector --web-ui
+```
+
+Usar outro banco na interface:
+
+```bash
+python -m portscan_detector --ui --database eventos.db
+python -m portscan_detector --web-ui --database eventos.db
+```
+
+## Cenario Demonstrativo
+
+Gerar um cenario demonstrativo com trafego sintetico e abrir a interface:
+
+```bash
+python -m portscan_detector --demo-scenario --database demo_port_scans.db
+```
+
+O cenario demonstrativo cria casos com:
+
+- validacao de acesso inicial por RDP/SSH;
+- caca horizontal por Redis exposto;
+- validacao distribuida de API Kubernetes;
+- inventario lento de superficie DevOps/Web;
+- sondagem UDP de rede/OT.
+
+A demo usa pacotes sinteticos criados localmente com Scapy, passa pelo mesmo detector, salva no SQLite e calcula risco tecnico e criticidade. Para manter a demo deterministica, ela nao depende de consultas externas de reputacao.
+
+Para abrir o dashboard web com esse banco:
+
+```bash
+python -m portscan_detector --web-ui --database demo_port_scans.db
+```
 
 ## Criticidade, Whitelist e Blacklist
 
@@ -132,14 +179,54 @@ Formato aceito:
 
 Regras em `blacklist.json` levam a criticidade automaticamente para `100`. Regras em `whitelist.json` reduzem a criticidade calculada. Quando houver conflito, a blacklist prevalece.
 
-A criticidade combina o comportamento observado com reputacao externa:
+A criticidade combina:
 
-- AbuseIPDB via `--abuseipdb-key` ou variavel `ABUSEIPDB_KEY`
-- GreyNoise via `--greynoise-key` ou variavel `GREYNOISE_KEY`; sem chave, tenta o endpoint community
-- CrowdSec via comando local `cscli`, quando instalado
-- WHOIS via comando local `whois`, quando instalado
+- risco tecnico inferido pela ferramenta;
+- comportamento observado, como volume, distribuicao, varredura horizontal e scan furtivo;
+- reputacao externa da origem, quando disponivel;
+- whitelist e blacklist locais.
 
 As consultas externas sao best-effort: falhas de rede, falta de chave ou ferramentas ausentes nao bloqueiam a deteccao local.
+
+## Exemplo de Alerta
+
+```text
+[ALERTA] Reconhecimento de acesso remoto seguido de possivel uso do servico | risco=99/100 | criticidade=99/100 | confianca=91%
+  Campanha: ID-0001 | Origem: 192.168.56.20 | Destino: 10.10.10.25 | Protocolo: TCP
+  Intencao provavel: A origem parece buscar pontos de entrada administrativos, como SSH, RDP, Telnet, WinRM ou VNC.
+  Servicos avaliados: 22/TCP SSH (possivelmente aberto), 3389/TCP RDP (possivelmente aberto)
+  Evidencia principal: Foram observadas 4 porta(s) distinta(s) em 6.0s.
+  Criticidade: comportamento:16; risco_tecnico:99
+  MITRE: T1046 - Network Service Discovery
+```
+
+## Campos Salvos
+
+Os eventos ficam salvos na tabela `port_scan_events` do SQLite. Por padrao, o arquivo e `port_scans.db`.
+
+Campos principais:
+
+- `detected_at`: horario de registro do alerta.
+- `first_seen` e `last_seen`: intervalo observado.
+- `source_ip` e `target_ip`: origem e destino do alerta.
+- `sources` e `targets`: origens e destinos envolvidos no caso.
+- `ports`: portas envolvidas.
+- `scan_types`: classificacoes tecnicas aplicadas.
+- `services`: servicos inferidos, categoria, criticidade tecnica e estado observado.
+- `hypothesis`: hipotese tecnica do comportamento.
+- `intent`: interpretacao formal da intencao provavel.
+- `severity`, `confidence`, `risk_score`: priorizacao tecnica.
+- `criticality`, `criticality_reasons`: criticidade operacional e motivos.
+- `evidence`: evidencias que sustentam o alerta.
+- `recommendations`: acoes defensivas sugeridas.
+- `campaign_id`: identificador do caso correlacionado.
+- `mitre_technique`: tecnica MITRE ATT&CK associada.
+
+Consulta simples:
+
+```bash
+sqlite3 port_scans.db "select detected_at, source_ip, target_ip, criticality, risk_score, ports, scan_types from port_scan_events;"
+```
 
 ## Teste Com Nmap
 
@@ -149,13 +236,7 @@ Rode o detector em um terminal:
 python -m portscan_detector --interface "NOME_DA_INTERFACE"
 ```
 
-Em outro terminal, execute scans com Nmap contra um host que voce tem autorizacao para testar. Para teste local:
-
-```bash
-nmap -sT 127.0.0.1
-```
-
-Exemplos para validar tipos diferentes:
+Em outro terminal, execute scans apenas contra hosts onde voce tem autorizacao:
 
 ```bash
 nmap -sS scanme.nmap.org
@@ -167,32 +248,8 @@ nmap -sA scanme.nmap.org
 nmap -sU -p 53,67,68,123 scanme.nmap.org
 ```
 
-Use scans apenas em hosts e redes onde voce tem autorizacao.
+## Observacao Tecnica
 
-## Saida
+O detector identifica comportamento compativel com reconhecimento ou varredura. Ele nao prova invasao e nao substitui validacao humana, IDS corporativo ou correlacao com logs de autenticacao, firewall e aplicacao.
 
-Os eventos ficam salvos na tabela `port_scan_events` do SQLite. Por padrao, o arquivo e `port_scans.db`.
-
-Campos salvos:
-
-- `detected_at`: quando o detector registrou o evento
-- `first_seen`: primeiro pacote observado na janela
-- `last_seen`: ultimo pacote observado na janela
-- `source_ip`: IP suspeito
-- `target_ip`: IP de destino
-- `ports`: lista de portas acessadas
-- `scan_types`: lista com um ou mais tipos identificados
-- `criticality`: criticidade de 0 a 100
-- `criticality_reasons`: motivos usados no calculo da criticidade
-- `port_count`: quantidade de portas diferentes
-- `packet_count`: quantidade de pacotes observados no evento
-
-Para consultar:
-
-```bash
-sqlite3 port_scans.db "select detected_at, source_ip, target_ip, criticality, ports, scan_types from port_scan_events;"
-```
-
-## Observacao
-
-Este detector identifica comportamento compativel com port scan, nao uma prova absoluta de ataque. Ajuste `--threshold`, `--window` e `--alert-threshold` conforme o volume normal da sua rede.
+O valor da ferramenta esta em transformar pacotes capturados pelo Scapy em eventos explicaveis: o que foi testado, qual superficie parece ter sido mapeada, o que possivelmente respondeu, qual reputacao ou regra afetou a criticidade e qual prioridade defensiva deve receber.
