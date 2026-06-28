@@ -238,7 +238,6 @@ class CriticalityAssessor:
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
         if not isinstance(data, dict):
             return reputation
-        print(data)
         return replace(
             reputation,
             country=str(data.get("countryCode") or reputation.country),
