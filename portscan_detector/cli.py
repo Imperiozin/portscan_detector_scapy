@@ -7,15 +7,21 @@ from pathlib import Path
 from scapy.all import sniff
 from scapy.utils import PcapReader
 
+from .demo_scenario import run_demo_scenario
 from .detector import Direction, PortScanDetector
 from .interface_listing import format_interface_names, get_interfaces, print_interfaces
-from .reputation import load_assessor
+from .reputation import CriticalityAssessor, load_assessor
 from .storage import SQLiteEventStore
+from .ui import render_operational_ui
+from .web_dashboard import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, run_web_dashboard
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Detecta possiveis port scans TCP SYN e salva eventos em SQLite."
+        description=(
+            "Detecta reconhecimento de rede com Scapy, enriquece os eventos com "
+            "hipótese técnica, exposição observada, severidade e evidências."
+        )
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--pcap", type=Path, help="Arquivo .pcap/.pcapng para analisar.")
@@ -24,6 +30,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-interfaces",
         action="store_true",
         help="Lista interfaces conhecidas pelo Scapy e encerra.",
+    )
+    source.add_argument(
+        "--ui",
+        action="store_true",
+        help="Abre a interface operacional de terminal com os eventos salvos no SQLite.",
+    )
+    source.add_argument(
+        "--web-ui",
+        action="store_true",
+        help="Abre o dashboard web local com os eventos salvos no SQLite.",
+    )
+    source.add_argument(
+        "--demo-scenario",
+        action="store_true",
+        help=(
+            "Gera um cenário sintético de reconhecimento, salva no SQLite "
+            "e abre a interface operacional."
+        ),
     )
     parser.add_argument(
         "--database",
@@ -85,8 +109,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--bpf",
-        default="tcp",
-        help="Filtro BPF usado na captura ao vivo. Padrao: tcp",
+        default="tcp or udp or icmp",
+        help="Filtro BPF usado na captura ao vivo. Padrao: tcp or udp or icmp",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Quantidade de eventos recentes exibidos na interface operacional. Padrao: 20",
+    )
+    parser.add_argument(
+        "--host",
+        default=DEFAULT_WEB_HOST,
+        help=f"Endereco local da interface web. Padrao: {DEFAULT_WEB_HOST}",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_WEB_PORT,
+        help=f"Porta inicial da interface web. Padrao: {DEFAULT_WEB_PORT}",
     )
     return parser
 
@@ -98,16 +139,48 @@ def main() -> None:
         print_interfaces()
         return
 
+    store = SQLiteEventStore(args.database)
+
+    if args.ui:
+        render_operational_ui(store, limit=args.limit)
+        return
+
+    if args.web_ui:
+        run_web_dashboard(args.database, host=args.host, port=args.port)
+        return
+
+    if args.demo_scenario:
+        demo_assessor = CriticalityAssessor(
+            abuseipdb_key="",
+            enable_whois=False,
+            enable_crowdsec=False,
+            enable_greynoise=False,
+        )
+        detector = PortScanDetector(
+            threshold=4,
+            window_seconds=20.0,
+            cooldown_seconds=args.cooldown,
+            on_event=store.save,
+            assess_event=demo_assessor.assess,
+            alert_threshold=args.alert_threshold,
+        )
+        packet_count = run_demo_scenario(detector)
+        print(
+            f"Cenário demonstrativo processado: {packet_count} pacote(s) sintético(s). "
+            f"Banco: {args.database}"
+        )
+        render_operational_ui(store, limit=args.limit)
+        return
+
     direction = resolve_direction(args.direction, using_live_capture=bool(args.interface))
     local_networks = resolve_local_networks(args.interface)
-
-    store = SQLiteEventStore(args.database)
     assessor = load_assessor(
         whitelist_path=args.whitelist,
         blacklist_path=args.blacklist,
         abuseipdb_key=args.abuseipdb_key,
         greynoise_key=args.greynoise_key,
     )
+
     detector = PortScanDetector(
         threshold=args.threshold,
         window_seconds=args.window,
@@ -125,7 +198,7 @@ def main() -> None:
 
     print(
         f"Capturando na interface {args.interface!r} "
-        f"(direcao={direction}). "
+        f"(direcao={direction}, filtro={args.bpf!r}). "
         "Pressione Ctrl+C para parar."
     )
     try:
@@ -141,9 +214,9 @@ def main() -> None:
         message = str(error).lower()
         if "winpcap" in message or "layer 2" in message:
             raise SystemExit(
-                "Captura ao vivo indisponivel: o Scapy nao encontrou WinPcap/Npcap.\n"
-                "No Windows, instale o Npcap, marque a opcao de compatibilidade "
-                "com WinPcap durante a instalacao e execute o terminal como "
+                "Captura ao vivo indisponível: o Scapy não encontrou WinPcap/Npcap.\n"
+                "No Windows, instale o Npcap, marque a opção de compatibilidade "
+                "com WinPcap durante a instalação e execute o terminal como "
                 "administrador. Depois rode novamente com --list-interfaces para "
                 "confirmar o nome da interface."
             ) from error
@@ -152,7 +225,7 @@ def main() -> None:
         message = str(error).lower()
         if "interface" in message and "not found" in message:
             raise SystemExit(
-                f"Interface nao encontrada: {args.interface!r}\n\n"
+                f"Interface não encontrada: {args.interface!r}\n\n"
                 f"{format_interface_names()}\n\n"
                 "Rode `python -m portscan_detector --list-interfaces` "
                 "para ver mais detalhes."
@@ -162,7 +235,7 @@ def main() -> None:
 
 def analyze_pcap(path: Path, detector: PortScanDetector) -> None:
     if not path.exists():
-        raise SystemExit(f"Arquivo nao encontrado: {path}")
+        raise SystemExit(f"Arquivo não encontrado: {path}")
 
     count = 0
     with PcapReader(str(path)) as packets:

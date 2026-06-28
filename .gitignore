@@ -1,2 +1,3 @@
-port_scans.db
+*.db
+__pycache__/
 portscan_detector/__pycache__/
